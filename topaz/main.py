@@ -31,6 +31,9 @@ USAGE = "\n".join([
     """  -rlibrary       require the library, before executing your script""",
     """  -s              enable some switch parsing for switches after script name""",
     """  -S              look for the script using PATH environment variable""",
+    """  --no-specialized   Disable specialized storage strategies""",
+    """  --log              Log aggregated storage operations""",
+    """  --log-trace        Log storage operations as they happen""",
     # """  -T[level=1]     turn on tainting checks""",
     """  -v              print version number, then turn on verbose mode""",
     """  -w              turn warnings on for your script""",
@@ -114,6 +117,14 @@ def _parse_argv(space, argv):
                     [space.newstr_fromstr("RUBY_DESCRIPTION")]
                 )
             ))
+            
+        elif arg == "--no-specialized":
+            space.strategy_factory.no_specialized_storage[0] = True
+        elif arg == "--log":
+            space.strategy_factory.logger.activate(aggregate=True)
+        elif arg == "--log-trace":
+            space.strategy_factory.logger.activate(aggregate=False)
+            
         elif arg == "-v":
             flag_globals_w["$-v"] = space.w_true
             flag_globals_w["$VERBOSE"] = space.w_true
@@ -324,5 +335,7 @@ def _entry_point(space, argv):
         status = exit_handler_status
     if w_exit_error is not None:
         print_traceback(space, w_exit_error, path)
-
+    
+    space.strategy_factory.logger.print_aggregated_log()
+    
     return status

@@ -73,7 +73,6 @@ from topaz.objects.timeobject import W_TimeObject
 from topaz.parser import Parser
 from topaz.utils.ll_file import isdir
 
-
 class SpaceCache(Cache):
     def __init__(self, space):
         Cache.__init__(self)
@@ -86,7 +85,7 @@ class SpaceCache(Cache):
 class ObjectSpace(object):
     def __init__(self, config):
         self.config = config
-
+        
         self.cache = SpaceCache(self)
         self.symbol_cache = {}
         self._executioncontexts = ExecutionContextHolder()
@@ -98,6 +97,9 @@ class ObjectSpace(object):
         self.w_false = W_FalseObject(self)
         self.w_nil = W_NilObject(self)
 
+        from topaz.objects.arrayobject import StrategyFactory
+        self.strategy_factory = StrategyFactory(self)
+        
         # Force the setup of a few key classes, we create a fake "Class" class
         # for the initial bootstrap.
         self.w_class = self.newclass("FakeClass", None)
