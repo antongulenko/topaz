@@ -58,14 +58,29 @@ class AbstractStrategy(object):
     def deepcopy_storage(self, from_obj, to_obj, memo):
         copied = copy.deepcopy(self.get_storage(from_obj), memo)
         self.set_storage(to_obj, copied)
-    
+    @objectmodel.specialize.argtype(0)
+    def reverse(self, arr):
+        self.get_storage(arr).reverse()
+    def sort(self, arr, block):
+        raise NotImplementedError("Abstract method")
+
 @rstrat.strategy()
 class ObjectStrategy(AbstractStrategy):
     import_from_mixin(rstrat.GenericStrategy)
     def default_value(self): return self.space.w_nil
-    
+    def sort(self, arr, block):
+        RubySorter(self.space, self.get_storage(arr), sortblock=block).sort()
+
+class NumberStrategy(AbstractStrategy):
+    @objectmodel.specialize.argtype(0)
+    def sort(self, arr, block):
+        # Need to create list of wrapped objects first...
+        wrapped = self.fetch_all(arr)
+        RubySorter(self.space, wrapped, sortblock=block).sort()
+        self.store_all(arr, wrapped)
+
 @rstrat.strategy(generalize=[ObjectStrategy])
-class IntStrategy(AbstractStrategy):
+class IntStrategy(NumberStrategy):
     import_from_mixin(rstrat.SingleTypeStrategy)
     contained_type = W_FixnumObject
     def default_value(self): return self.wrap(0)
@@ -73,7 +88,7 @@ class IntStrategy(AbstractStrategy):
     def unwrap(self, w_val): assert isinstance(w_val, W_FixnumObject); return w_val.intvalue
     
 @rstrat.strategy(generalize=[ObjectStrategy])
-class FloatStrategy(AbstractStrategy):
+class FloatStrategy(NumberStrategy):
     import_from_mixin(rstrat.SingleTypeStrategy)
     contained_type = W_FloatObject
     def default_value(self): return self.wrap(0)
@@ -89,6 +104,10 @@ class EmptyStrategy(AbstractStrategy):
     import_from_mixin(rstrat.EmptyStrategy)
     def deepcopy_storage(self, from_obj, to_obj, memo):
         self.initialize_storage(to_obj, 0)
+    def reverse(self, arr):
+        pass
+    def sort(self, arr, block):
+        pass
 
 class RubySorter(BaseRubySorter):
     def __init__(self, space, list, listlength=None, sortblock=None):
@@ -386,25 +405,22 @@ class W_ArrayObject(W_Object):
     @classdef.method("sort!")
     @check_frozen()
     def method_sort_i(self, space, block):
-        #RubySorter(space, self.items_w, sortblock=block).sort()
-        #return self
-        raise NotImplementedError("sort!")
+        self.strategy.sort(self, block)
+        return self
 
     @classdef.method("sort_by!")
     @check_frozen()
     def method_sort_by_i(self, space, block):
         if block is None:
             return space.send(self, "enum_for", [space.newsymbol("sort_by!")])
-        #RubySortBy(space, self.items_w, sortblock=block).sort()
-        #return self
-        raise NotImplementedError("sort!")
+        self.strategy.sort(self, block)
+        return self
 
     @classdef.method("reverse!")
     @check_frozen()
     def method_reverse_i(self, space):
-        #self.items_w.reverse()
-        #return self
-        raise NotImplementedError("sort!")
+        self.strategy.reverse(self)
+        return self
 
     @classdef.method("rotate!", n="int")
     @check_frozen()
