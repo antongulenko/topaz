@@ -54,6 +54,10 @@ class AbstractStrategy(object):
         self.space = space
     def strategy_factory(self):
         return self.space.strategy_factory
+    @objectmodel.specialize.argtype(0)
+    def deepcopy_storage(self, from_obj, to_obj, memo):
+        copied = copy.deepcopy(self.get_storage(from_obj), memo)
+        self.set_storage(to_obj, copied)
     
 @rstrat.strategy()
 class ObjectStrategy(AbstractStrategy):
@@ -83,7 +87,8 @@ class FloatStrategy(AbstractStrategy):
 ])
 class EmptyStrategy(AbstractStrategy):
     import_from_mixin(rstrat.EmptyStrategy)
-
+    def deepcopy_storage(self, from_obj, to_obj, memo):
+        self.initialize_storage(to_obj, 0)
 
 class RubySorter(BaseRubySorter):
     def __init__(self, space, list, listlength=None, sortblock=None):
@@ -126,6 +131,7 @@ class W_ArrayObject(W_Object):
     def __deepcopy__(self, memo):
         obj = super(W_ArrayObject, self).__deepcopy__(memo)
         obj.strategy = self.strategy
+        obj.strategy.deepcopy_storage(self, obj, memo)
         return obj
 
     def listview(self, space):
