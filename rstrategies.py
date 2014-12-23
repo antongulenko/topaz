@@ -5,6 +5,10 @@ from rpython.rlib import jit, objectmodel, rerased
 from rpython.rlib.objectmodel import specialize
 
 def make_accessors(strategy='strategy', storage='storage'):
+    """
+    Instead of using this generator, the methods can be implemented manually.
+    Alternatively, the getter/setter methods in StrategyFactory can be overwritten.
+    """
     def make_getter(attr):
         def getter(self): return getattr(self, attr)
         return getter
@@ -18,11 +22,14 @@ def make_accessors(strategy='strategy', storage='storage'):
     classdef['_set_storage'] = make_setter(storage)
 
 class StrategyMetaclass(type):
+    """
+    A metaclass is required, because we need certain attributes to be special for every single class.
+    """
     def __new__(self, name, bases, attrs):
         attrs['_is_strategy'] = False
         attrs['_is_singleton'] = False
         attrs['_specializations'] = []
-        # Not every strategy uses rerased-pairs, but they won't hury
+        # Not every strategy uses rerased-pairs, but they won't hurt
         erase, unerase = rerased.new_erasing_pair(name)
         def get_storage(self, w_self):
             erased = self.strategy_factory().get_storage(w_self)
@@ -35,6 +42,12 @@ class StrategyMetaclass(type):
         return type.__new__(self, name, bases, attrs)
     
 def strategy(generalize=None, singleton=True):
+    """
+    Strategy classes must be decorated with this.
+    generalize is a list of other strategies, that can be switched to from the decorated strategy.
+    If the singleton flag is set to False, new strategy instances will be created,
+    instead of always reusing the singleton object.
+    """
     def decorator(strategy_class):
         # Patch strategy class: Add generalized_strategy_for and mark as strategy class.
         if generalize:
@@ -75,9 +88,125 @@ class StrategyFactory(object):
             self.patch_strategy_class(strategy_class, root_class)
         self.order_strategies()
     
-    @jit.elidable
-    def strategy_singleton_instance(self, strategy_class):
-        return getattr(strategy_class, self.strategy_singleton_field)
+    # =============================
+    # API methods
+    # =============================
+    
+    def switch_strategy(self, w_self, new_strategy_type, new_element=None):
+        """
+        Switch the strategy of w_self to the new type.
+        new_element can be given as as hint, purely for logging purposes.
+        """
+        old_strategy = self.get_strategy(w_self)
+        if new_strategy_type._is_singleton:
+            new_strategy = self.strategy_singleton_instance(new_strategy_type)
+        else:
+            size = old_strategy.size(w_self)
+            new_strategy = self.instantiate_strategy(new_strategy_type, w_self, size)
+        self.set_strategy(w_self, new_strategy)
+        old_strategy.convert_storage_to(w_self, new_strategy)
+        new_strategy.strategy_switched(w_self)
+        self.log(w_self, new_strategy, old_strategy, new_element)
+        return new_strategy
+    
+    def set_initial_strategy(self, w_self, strategy_type, size, elements=None):
+        """
+        Initialize the strategy and storage fields of w_self.
+        This must be called before switch_strategy or any strategy method can be used.
+        elements is an optional list of values initially stored in w_self.
+        If given, then len(elements) == size must hold.
+        """
+        assert self.get_strategy(w_self) is None, "Strategy should not be initialized yet!"
+        if strategy_type._is_singleton:
+            strategy = self.strategy_singleton_instance(strategy_type)
+        else:
+            strategy = self.instantiate_strategy(strategy_type, w_self, size)
+        self.set_strategy(w_self, strategy)
+        strategy.initialize_storage(w_self, size)
+        element = None
+        if elements:
+            strategy.store_all(w_self, elements)
+            if len(elements) > 0: element = elements[0]
+        strategy.strategy_switched(w_self)
+        self.log(w_self, strategy, None, element)
+        return strategy
+    
+    @jit.unroll_safe
+    def strategy_type_for(self, objects):
+        """
+        Return the best-fitting strategy to hold all given objects.
+        """
+        specialized_strategies = len(self.strategies)
+        can_handle = [True] * specialized_strategies
+        for obj in objects:
+            if specialized_strategies <= 1:
+                break
+            for i, strategy in enumerate(self.strategies):
+                if can_handle[i] and not self.strategy_singleton_instance(strategy).check_can_handle(obj):
+                    can_handle[i] = False
+                    specialized_strategies -= 1
+        for i, strategy_type in enumerate(self.strategies):
+            if can_handle[i]:
+                return strategy_type
+        raise Exception("Could not find strategy to handle: %s" % objects)
+    
+    def decorate_strategies(self, transitions):
+        """
+        As an alternative to decorating all strategies with @strategy,
+        invoke this in the constructor of your StrategyFactory subclass, before
+        calling __init__. transitions is a dict mapping all strategy classes to
+        their 'generalize' list parameter (see @strategy decorator).
+        """
+        "NOT_RPYTHON"
+        for strategy_class, generalized in transitions.items():
+            strategy(generalized)(strategy_class)
+    
+    # =============================
+    # The following methods can be overwritten to customize certain aspects of the factory.
+    # =============================
+    
+    def instantiate_strategy(self, strategy_type, w_self=None, initial_size=0):
+        """
+        Return a functional instance of strategy_type.
+        Overwrite this if you need a non-default constructor.
+        The two additional parameters should be ignored for singleton-strategies.
+        """
+        return strategy_type()
+    
+    def log(self, w_self, new_strategy, old_strategy=None, new_element=None):
+        """
+        This can be overwritten into a more appropriate call to self.logger.log
+        """
+        if not self.logger.active: return
+        new_strategy_str = self.log_string_for_object(new_strategy)
+        old_strategy_str = self.log_string_for_object(old_strategy)
+        element_typename = self.log_string_for_object(new_element)
+        size = new_strategy.size(w_self)
+        typename = ""
+        cause = "Switched" if old_strategy else "Created"
+        self.logger.log(new_strategy_str, size, cause, old_strategy_str, typename, element_typename)
+    
+    @objectmodel.specialize.call_location()
+    def log_string_for_object(self, obj):
+        return obj.__class__.__name__ if obj else ""
+    
+    # These storage accessors are specialized because the storage field is 
+    # populated by erased-objects which seem to be incompatible sometimes.
+    @specialize.call_location()
+    def get_storage(self, obj):
+        return obj._get_storage()
+    @specialize.call_location()
+    def set_storage(self, obj, val):
+        return obj._set_storage(val)
+    
+    def get_strategy(self, obj):
+        return obj._get_strategy()
+    def set_strategy(self, obj, val):
+        return obj._set_strategy(val)
+    
+    # =============================
+    # Internal methods
+    # =============================
     
     def patch_strategy_class(self, strategy_class, root_class):
         "NOT_RPYTHON"
@@ -101,11 +230,6 @@ class StrategyFactory(object):
             subclasses.extend(self.collect_subclasses(subcls))
         return subclasses
     
-    def decorate_strategies(self, transitions):
-        "NOT_RPYTHON"
-        for strategy_class, generalized in transitions.items():
-            strategy(generalized)(strategy_class)
-    
     def order_strategies(self):
         "NOT_RPYTHON"
         def get_generalization_depth(strategy, visited=None):
@@ -124,84 +248,9 @@ class StrategyFactory(object):
                 return 0
         self.strategies.sort(key=get_generalization_depth, reverse=True)
     
-    # Return a functional instance of strategy_type.
-    # Overwrite this if you need a non-default constructor.
-    # The two additional parameters should be ignored for singleton-strategies.
-    def instantiate_strategy(self, strategy_type, w_self=None, initial_size=0):
-        return strategy_type()
-    
-    # These storage accessors are specialized because the storage field is 
-    # populated by erased-objects which seem to be incompatible sometimes.
-    @specialize.call_location()
-    def get_storage(self, obj):
-        return obj._get_storage()
-    @specialize.call_location()
-    def set_storage(self, obj, val):
-        return obj._set_storage(val)
-    
-    def get_strategy(self, obj):
-        return obj._get_strategy()
-    def set_strategy(self, obj, val):
-        return obj._set_strategy(val)
-    
-    # This can be overwritten into a more appropriate call to self.logger.log
-    def log(self, w_self, new_strategy, old_strategy=None, new_element=None):
-        if not self.logger.active: return
-        new_strategy_str = self.log_string_for_object(new_strategy)
-        old_strategy_str = self.log_string_for_object(old_strategy)
-        element_typename = self.log_string_for_object(new_element)
-        size = new_strategy.size(w_self)
-        typename = ""
-        cause = "Switched" if old_strategy else "Created"
-        self.logger.log(new_strategy_str, size, cause, old_strategy_str, typename, element_typename)
-    
-    @objectmodel.specialize.call_location()
-    def log_string_for_object(self, obj):
-        return obj.__class__.__name__ if obj else ""
-    
-    def switch_strategy(self, w_self, old_strategy, new_strategy_type, new_element=None):
-        if new_strategy_type._is_singleton:
-            new_strategy = self.strategy_singleton_instance(new_strategy_type)
-        else:
-            size = old_strategy.size(w_self)
-            new_strategy = self.instantiate_strategy(new_strategy_type, w_self, size)
-        self.set_strategy(w_self, new_strategy)
-        old_strategy.convert_storage_to(w_self, new_strategy)
-        new_strategy.strategy_switched(w_self)
-        self.log(w_self, new_strategy, old_strategy, new_element)
-        return new_strategy
-    
-    def set_initial_strategy(self, w_self, strategy_type, size, elements=None):
-        assert self.get_strategy(w_self) is None, "Strategy should not be initialized yet!"
-        if strategy_type._is_singleton:
-            strategy = self.strategy_singleton_instance(strategy_type)
-        else:
-            strategy = self.instantiate_strategy(strategy_type, w_self, size)
-        self.set_strategy(w_self, strategy)
-        strategy.initialize_storage(w_self, size)
-        element = None
-        if elements:
-            strategy.store_all(w_self, elements)
-            if len(elements) > 0: element = elements[0]
-        strategy.strategy_switched(w_self)
-        self.log(w_self, strategy, None, element)
-        return strategy
-    
-    @jit.unroll_safe
-    def strategy_type_for(self, objects):
-        specialized_strategies = len(self.strategies)
-        can_handle = [True] * specialized_strategies
-        for obj in objects:
-            if specialized_strategies <= 1:
-                break
-            for i, strategy in enumerate(self.strategies):
-                if can_handle[i] and not self.strategy_singleton_instance(strategy).check_can_handle(obj):
-                    can_handle[i] = False
-                    specialized_strategies -= 1
-        for i, strategy_type in enumerate(self.strategies):
-            if can_handle[i]:
-                return strategy_type
-        raise Exception("Could not find strategy to handle: %s" % objects)
+    @jit.elidable
+    def strategy_singleton_instance(self, strategy_class):
+        return getattr(strategy_class, self.strategy_singleton_field)
     
     def _freeze_(self):
         # Instance will be frozen at compile time, making accesses constant.
@@ -283,7 +332,7 @@ class AbstractStrategy(object):
     
     def generalize_for_value(self, w_self, value):
         strategy_type = self.generalized_strategy_for(value)
-        new_instance = self.strategy_factory().switch_strategy(w_self, self, strategy_type, new_element=value)
+        new_instance = self.strategy_factory().switch_strategy(w_self, strategy_type, new_element=value)
         return new_instance
         
     def cannot_handle_store(self, w_self, index0, value):
